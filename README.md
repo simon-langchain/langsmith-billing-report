@@ -34,7 +34,7 @@ python langsmith_billing_report.py \
 
 ### Multiple orgs (parallel)
 
-Create an `orgs.json` file (only `api_key` is required per entry):
+Create an `orgs.json` file. Only `api_key` is required per entry; include `org_id` for SaaS environments or where the key is not implicitly org-scoped:
 
 ```json
 [

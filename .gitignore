@@ -1,6 +1,5 @@
 # API keys / org config — never commit
 orgs.json
-*.json
 
 # CSV report output
 *.csv
