@@ -79,6 +79,8 @@ Orgs are fetched in parallel (default: 4 workers, configurable with `--workers`)
 
 Uses the `/billing/granular-usage` endpoint, scoped to the org the API key belongs to. Supports `--level workspace` (default) and `--level project`.
 
+> **Self-hosted**: Requires LangSmith v0.13.12 or later. Use `--mode overview` on older versions.
+
 ### Overview (`--mode overview`)
 
 Uses the `/billing/usage` endpoint, which pulls data from the billing provider. Shows a per-metric breakdown per workspace — useful for seeing the base/extended trace split as it appears in billing.
