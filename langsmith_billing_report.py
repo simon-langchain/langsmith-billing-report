@@ -25,6 +25,13 @@ orgs.json format (only api_key is required; org_id and org_name are optional):
       {"api_key": "lsv2_sk_..."},
       {"api_key": "lsv2_sk_...", "org_id": "uuid", "org_name": "Org B"}
     ]
+
+Modes:
+    --mode granular  (default) Uses /billing/granular-usage. Scoped to the org
+                     the API key belongs to. Supports --level workspace|project.
+    --mode overview  Uses /billing/usage. Pulls from the billing provider
+                     and shows a per-metric breakdown (e.g.
+                     base_traces, extended_traces) per workspace.
 """
 
 import argparse
@@ -129,6 +136,27 @@ def fetch_granular_usage(
     return result.get("usage", [])
 
 
+def fetch_billing_usage(
+    base_url: str,
+    api_key: str,
+    org_id: str,
+    start: str,
+    end: str,
+) -> list[dict]:
+    """GET /orgs/current/billing/usage.
+
+    Returns a list of OrgUsage records from the billing provider.
+    Each record has billable_metric_name, value, and groups (workspace_id -> float).
+    """
+    params = {
+        "starting_on": f"{start}T00:00:00Z",
+        "ending_before": f"{end}T00:00:00Z",
+    }
+    result = make_request(
+        base_url, api_key, org_id, "/orgs/current/billing/usage", params
+    )
+    return result
+
 
 # ---------------------------------------------------------------------------
 # Row builders
@@ -191,6 +219,39 @@ def build_workspace_rows(granular_usage: list[dict], org_name: str) -> list[dict
     )
 
 
+def build_overview_rows(
+    billing_usage: list[dict],
+    org_name: str,
+    workspace_map: dict[str, str],
+) -> list[dict]:
+    """Build one row per (workspace, metric) from /billing/usage response.
+
+    workspace_map maps workspace_id -> display_name and is used to resolve
+    the workspace IDs returned in the groups dict.
+    """
+    # Accumulate (ws_id, metric_name) -> value
+    aggregated: dict[tuple[str, str], float] = {}
+
+    for item in billing_usage:
+        metric = item.get("billable_metric_name") or "unknown"
+        groups = item.get("groups") or {}
+        for ws_id, value in groups.items():
+            key = (ws_id, metric)
+            aggregated[key] = aggregated.get(key, 0.0) + (value or 0.0)
+
+    rows = []
+    for (ws_id, metric), value in aggregated.items():
+        ws_name = workspace_map.get(ws_id) or f"[unknown workspace: {ws_id}]"
+        rows.append({
+            "org": org_name,
+            "workspace": ws_name,
+            "metric": metric,
+            "value": int(value),
+        })
+
+    return sorted(rows, key=lambda r: (r["workspace"], r["metric"]))
+
+
 # ---------------------------------------------------------------------------
 # Output helpers
 # ---------------------------------------------------------------------------
@@ -207,12 +268,13 @@ def print_table(rows: list[dict], columns: list[str]) -> None:
         print("  ".join(str(row.get(col, "")).ljust(widths[col]) for col in columns))
 
 
-def write_csv(rows: list[dict], columns: list[str], path: str) -> None:
+def write_csv(rows: list[dict], columns: list[str], path: str, quiet: bool = False) -> None:
     with open(path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-    print(f"Saved to {path}", file=sys.stderr)
+    if not quiet:
+        print(f"Saved to {path}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -226,50 +288,55 @@ def fetch_org_rows(
     org_name: str,
     start: str,
     end: str,
+    mode: str,
     level: str,
+    quiet: bool = False,
 ) -> list[dict]:
     """Fetch and build rows for a single org. Safe to run in a thread."""
+    def log(msg: str, **kwargs) -> None:
+        if not quiet:
+            print(msg, file=sys.stderr, **kwargs)
+
     if not org_name:
         _, org_name = fetch_org_info(base_url, api_key, org_id)
-    print(f"[{org_name}] Fetching workspaces...", file=sys.stderr)
+    log(f"[{org_name}] Fetching workspaces...")
     workspaces = fetch_workspaces(base_url, api_key, org_id)
     workspace_map = {str(ws["id"]): ws["display_name"] for ws in workspaces}
     workspace_ids = list(workspace_map.keys())
-    print(
+    log(
         f"[{org_name}] Found {len(workspace_ids)} workspace(s): "
-        f"{', '.join(workspace_map.values())}",
-        file=sys.stderr,
+        f"{', '.join(workspace_map.values())}"
     )
 
     if not workspace_ids:
         return []
 
+    if mode == "overview":
+        log(f"[{org_name}] Fetching billing usage (overview) {start} -> {end}...")
+        billing = fetch_billing_usage(base_url, api_key, org_id, start, end)
+        return build_overview_rows(billing, org_name, workspace_map)
+
+    # mode == "granular"
     if level == "project":
         # The API does not include workspace_id in the project-level grouping response,
         # so we call the endpoint once per workspace and apply the known name.
-        print(
+        log(
             f"[{org_name}] Fetching granular usage (by project) for "
-            f"{len(workspace_ids)} workspace(s) {start} -> {end}...",
-            file=sys.stderr,
+            f"{len(workspace_ids)} workspace(s) {start} -> {end}..."
         )
         all_rows = []
         total = len(workspace_map)
         for i, (ws_id, ws_name) in enumerate(workspace_map.items(), 1):
-            print(f"[{org_name}]   [{i}/{total}] {ws_name}...", file=sys.stderr, flush=True)
+            log(f"[{org_name}]   [{i}/{total}] {ws_name}...", flush=True)
             granular = fetch_granular_usage(base_url, api_key, org_id, [ws_id], start, end)
             ws_rows = build_project_rows(granular, org_name, ws_name)
-            print(f"[{org_name}]         -> {len(ws_rows)} project(s)", file=sys.stderr, flush=True)
+            log(f"[{org_name}]         -> {len(ws_rows)} project(s)", flush=True)
             all_rows.extend(ws_rows)
         return sorted(all_rows, key=lambda r: (r["workspace"], r["project"]))
     else:
-        print(f"[{org_name}] Fetching workspace-level granular usage {start} -> {end}...", file=sys.stderr)
+        log(f"[{org_name}] Fetching workspace-level granular usage {start} -> {end}...")
         granular = fetch_granular_usage(base_url, api_key, org_id, workspace_ids, start, end, group_by="workspace")
         rows = build_workspace_rows(granular, org_name)
-        # Fill in workspaces that had no usage in this period
-        reported = {r["workspace"] for r in rows}
-        for ws_name in workspace_map.values():
-            if ws_name not in reported:
-                rows.append({"org": org_name, "workspace": ws_name, "traces": 0})
         return sorted(rows, key=lambda r: r["workspace"])
 
 
@@ -285,10 +352,17 @@ def main():
                         help="Start date YYYY-MM-DD (inclusive)")
     parser.add_argument("--end", required=True,
                         help="End date YYYY-MM-DD (exclusive, i.e. day after last day)")
+    parser.add_argument("--mode", choices=["granular", "overview"], default="granular",
+                        help="granular (default): uses /billing/granular-usage, scoped to org; "
+                             "overview: uses /billing/usage from the billing provider, "
+                             "shows per-metric breakdown per workspace")
     parser.add_argument("--level", choices=["workspace", "project"], default="workspace",
-                        help="Report granularity (default: workspace)")
+                        help="Report granularity for granular mode (default: workspace). "
+                             "Ignored in overview mode.")
     parser.add_argument("--output", default="",
                         help="Optional CSV output file path")
+    parser.add_argument("--silent", action="store_true",
+                        help="Suppress all output including progress messages. Use with --output to save results silently.")
 
     # Single-org args
     single = parser.add_argument_group("single org")
@@ -304,6 +378,12 @@ def main():
 
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")
+
+    if args.silent and not args.output:
+        print("Warning: --silent is set but --output is not — results will not be saved anywhere.", file=sys.stderr)
+
+    if args.mode == "overview" and args.level != "workspace":
+        print("Warning: --level is ignored in overview mode (billing/usage only provides workspace-level data).", file=sys.stderr)
 
     # Build org list
     if args.orgs:
@@ -322,7 +402,8 @@ def main():
         all_rows = fetch_org_rows(
             base_url, org["api_key"], org.get("org_id", ""),
             org.get("org_name", ""),
-            args.start, args.end, args.level,
+            args.start, args.end, args.mode, args.level,
+            quiet=args.silent,
         )
     else:
         futures = {}
@@ -332,7 +413,8 @@ def main():
                     fetch_org_rows,
                     base_url, org["api_key"], org.get("org_id", ""),
                     org.get("org_name", ""),
-                    args.start, args.end, args.level,
+                    args.start, args.end, args.mode, args.level,
+                    args.silent,
                 )
                 futures[future] = org.get("org_name") or org.get("org_id", "")
             for future in as_completed(futures):
@@ -342,23 +424,44 @@ def main():
                 except Exception as e:
                     print(f"[{org_name}] Failed: {e}", file=sys.stderr)
 
-        # Sort combined results by org then workspace (then project if present)
-        all_rows.sort(key=lambda r: (r["org"], r.get("workspace", ""), r.get("project", "")))
+        # Sort combined results by org then workspace (then project/metric if present)
+        all_rows.sort(key=lambda r: (r["org"], r.get("workspace", ""), r.get("project", ""), r.get("metric", "")))
+
+    # Drop rows with no usage
+    value_field = "value" if args.mode == "overview" else "traces"
+    all_rows = [r for r in all_rows if r.get(value_field, 0)]
 
     if not all_rows:
-        print("No usage data found for the specified period.", file=sys.stderr)
+        if not args.silent:
+            print("No usage data found for the specified period.", file=sys.stderr)
         return
 
-    columns = (
-        ["org", "workspace", "project", "traces"]
-        if args.level == "project"
-        else ["org", "workspace", "traces"]
-    )
+    if args.mode == "overview":
+        columns = ["org", "workspace", "metric", "value"]
+        dedup_key = lambda r: (r["org"], r["workspace"], r["metric"])
+    elif args.level == "project":
+        columns = ["org", "workspace", "project", "traces"]
+        dedup_key = lambda r: (r["org"], r["workspace"], r["project"])
+    else:
+        columns = ["org", "workspace", "traces"]
+        dedup_key = lambda r: (r["org"], r["workspace"])
 
-    print_table(all_rows, columns)
+    seen = set()
+    deduped = []
+    for row in all_rows:
+        k = dedup_key(row)
+        if k not in seen:
+            seen.add(k)
+            deduped.append(row)
+    if len(deduped) < len(all_rows) and not args.silent:
+        print(f"Removed {len(all_rows) - len(deduped)} duplicate row(s).", file=sys.stderr)
+    all_rows = deduped
+
+    if not args.silent and not args.output:
+        print_table(all_rows, columns)
 
     if args.output:
-        write_csv(all_rows, columns, args.output)
+        write_csv(all_rows, columns, args.output, quiet=args.silent)
 
 
 if __name__ == "__main__":
