@@ -95,6 +95,8 @@ Acme  dev           base_traces        8204
 
 Note: `--level` is ignored in overview mode — the billing endpoint only provides workspace-level data.
 
+> **Workspace name resolution**: overview mode resolves workspace names via `/workspaces`, which only returns workspaces the service account is a member of. Workspaces outside its membership will appear as `[unknown workspace: <id>]`. To resolve all names, ensure the service account has org-admin access or is a member of every workspace.
+
 ## Report levels (granular mode)
 
 ### Workspace (default)

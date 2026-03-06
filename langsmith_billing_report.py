@@ -235,13 +235,18 @@ def build_overview_rows(
     for item in billing_usage:
         metric = item.get("billable_metric_name") or "unknown"
         groups = item.get("groups") or {}
-        for ws_id, value in groups.items():
-            key = (ws_id, metric)
-            aggregated[key] = aggregated.get(key, 0.0) + (value or 0.0)
+        if groups:
+            for ws_id, value in groups.items():
+                key = (ws_id, metric)
+                aggregated[key] = aggregated.get(key, 0.0) + (value or 0.0)
+        else:
+            # Org-level metric with no workspace breakdown (e.g. self-hosted nodes executed)
+            key = ("[org]", metric)
+            aggregated[key] = aggregated.get(key, 0.0) + (item.get("value") or 0.0)
 
     rows = []
     for (ws_id, metric), value in aggregated.items():
-        ws_name = workspace_map.get(ws_id) or f"[unknown workspace: {ws_id}]"
+        ws_name = "[org]" if ws_id == "[org]" else (workspace_map.get(ws_id) or f"[unknown workspace: {ws_id}]")
         rows.append({
             "org": org_name,
             "workspace": ws_name,
