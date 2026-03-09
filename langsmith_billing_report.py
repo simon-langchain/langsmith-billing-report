@@ -240,15 +240,20 @@ def build_overview_rows(
                 key = (ws_id, metric)
                 aggregated[key] = aggregated.get(key, 0.0) + (value or 0.0)
         else:
-            # Org-level metric with no workspace breakdown (e.g. self-hosted nodes executed)
-            key = ("[org]", metric)
+            # Account-level metric with no workspace breakdown (e.g. self-hosted nodes executed)
+            key = ("[account]", metric)
             aggregated[key] = aggregated.get(key, 0.0) + (item.get("value") or 0.0)
 
     rows = []
     for (ws_id, metric), value in aggregated.items():
-        ws_name = "[org]" if ws_id == "[org]" else (workspace_map.get(ws_id) or f"[unknown workspace: {ws_id}]")
+        if ws_id == "[account]":
+            row_org = "Account Level Data"
+            ws_name = "n/a"
+        else:
+            row_org = org_name
+            ws_name = workspace_map.get(ws_id) or f"[unknown workspace: {ws_id}]"
         rows.append({
-            "org": org_name,
+            "org": row_org,
             "workspace": ws_name,
             "metric": metric,
             "value": int(value),
