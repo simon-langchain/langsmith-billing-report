@@ -248,7 +248,7 @@ def build_overview_rows(
     for (ws_id, metric), value in aggregated.items():
         if ws_id == "[account]":
             row_org = "Account Level Data"
-            ws_name = "n/a"
+            ws_name = ""
         else:
             row_org = org_name
             ws_name = workspace_map.get(ws_id) or f"[unknown workspace: {ws_id}]"
